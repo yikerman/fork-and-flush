@@ -34,7 +34,12 @@ Claude Code plugin (the skill):
 or from a local checkout: `/plugin marketplace add /path/to/fork-and-flush`, then
 `/plugin install fork-and-flush@fork-and-flush`.
 
-Codex skill: `ln -s "$PWD/skills/fork-and-flush" ~/.codex/skills/fork-and-flush`
+Codex plugin (Codex reads the same `.claude-plugin/` manifests):
+
+```sh
+codex plugin marketplace add yikerman/fork-and-flush
+codex plugin add fork-and-flush@fork-and-flush
+```
 
 ## Use
 
