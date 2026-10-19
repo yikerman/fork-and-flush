@@ -1,132 +1,149 @@
 # fork-and-flush
 
-An implementation of **fork-and-flush** ([arXiv:2610.07447](https://arxiv.org/abs/2610.07447)) for
-Claude Code and Codex. It drives a long-running "autoresearch" agent on a problem with a numeric
-score and periodically forks it into fresh-context branches, keeping the best-scoring one:
+Fork-and-flush for **Claude Code** and **Codex**: run a research agent for hours or days on a problem
+with a numeric score, and periodically fork it into fresh-context branches, keeping the best.
 
-1. **Opening round:** K agents start from your workspace, each with its own copy and session.
-2. **Lead:** the best-scoring branch continues alone (same files, same session) until the next fork point.
-3. **Fork and flush:** K new branches copy the leader's files but start **fresh chat contexts**. Each
-   gets a slice of the budget, and the best one becomes the new leader.
-4. Repeat at every fork point; the leader spends what is left.
+## The paper
 
-The paper's defaults are K=4, about 6% of the budget per branch, and forks at 33% and 66%. In the
-paper this beat both a single run and best-of-4 by 66% and 44% (normalized score, equal compute),
-because independent runs tend to stay in one "idea basin", and a fresh context with the same files
-can jump out of it.
+[Fork-and-Flush: Escaping Idea Basins in Autoresearch Agents](https://arxiv.org/abs/2610.07447)
+(Cai, Ziakas et al., Microsoft Research, 2026) observes that independent runs of the same agent on the
+same task plateau at very different scores. Each run stays in one family of approaches, an *idea
+basin*, and compacting its chat history does not get it out. The fix is periodic:
 
-It is meant to be **invoked by hand on hard research problems**: from Claude Code or Codex you ask for
-a fork-and-flush run, and the skill walks you through writing the task and grader, then launches and
-monitors a background run. Requires Linux or macOS, git, Python 3.9+, and `claude` and/or `codex`.
+- **fork:** start K branches, each with its own copy of the current files;
+- **flush:** give every branch a fresh chat context, so it re-derives its intent from the files;
+- **select:** the best-scoring branch continues; the others are discarded.
+
+With K=4, about 6% of the budget per branch and forks at 33% and 66%, it beat a single run by 66% and
+best-of-4 by 44% (normalized score, equal compute) across 13 long-horizon tasks.
 
 ## Install
 
 ```sh
-uv tool install git+https://github.com/yikerman/fork-and-flush   # or, from a checkout: uv tool install .
+uv tool install git+https://github.com/yikerman/fork-and-flush   # the CLI
 ```
 
-Claude Code plugin (the skill):
+| Agent | Plugin (the setup skill) |
+| :- | :- |
+| Claude Code | `/plugin install fork-and-flush --marketplace yikerman/fork-and-flush` |
+| Codex | `codex plugin marketplace add yikerman/fork-and-flush`, then `codex plugin add fork-and-flush@fork-and-flush` |
 
+Requires Linux or macOS, Python 3.9+, and `claude` or `codex`. On Linux the agents' sandbox needs
+`bwrap` (and `socat` for Claude Code).
+
+## Usage
+
+Ask for a run in plain words, from Claude Code (or `/fork-and-flush:fork-and-flush`) or from Codex:
+
+> Start a fork-and-flush run on `~/research/packing`. The goal is to make `solver.py` pack more
+> rectangles. Score it with my benchmark in `~/research/packing-bench` and keep that hidden from the
+> agents. Use Codex with gpt-6.1-sol at high effort and a 40M token budget.
+
+The agent then sets the run up with you:
+
+1. `fork-and-flush init ~/research/packing --agent codex --budget-mtok 40 --name packing`
+2. writes `TASK.md` with you: the goal and rules in words, no budget, nothing about how it is scored;
+3. writes `private/grader/grade.py` around your benchmark and puts the hidden data in `private/`;
+4. asks whether the score depends on timing (if so: `parallel: 1`, `grader.exclusive: true`);
+5. `fork-and-flush check packing`: grades the start twice, and has the agent try to read a canary
+   in `private/`;
+6. shows you `config.json` (model, effort, K, fork points, network) and waits for your go-ahead;
+7. `fork-and-flush start packing`, which returns at once; the run continues in the background.
+
+Later, from any session of either tool:
+
+> How's the packing run doing? · Stop it for now. · It finished; put the best version into my repo.
+
+These map to `fork-and-flush status`, `stop` (`start` resumes) and copying from `<run>/best`, a
+read-only snapshot of the best submission. Runs live in `~/.local/share/fork-and-flush/runs/`.
+
+**The grader** runs on a snapshot of a submission (`$FF_SUBMISSION`, also its working directory).
+It prints feedback for the agent on stdout and the score as its last stdout line, higher is better.
+stderr stays private, and a non-zero exit marks the submission invalid. It must be deterministic.
+
+## Design philosophy
+
+- **Around the agent, not inside it.** Like the paper, which wrapped an unmodified agent CLI, this is
+  an orchestrator around unmodified Claude Code and Codex.
+- **Documented interfaces only.** Agents are driven through their published headless protocols and
+  confined by their own documented sandbox settings. No private files, no reverse engineering.
+- **Intent, not implementation.** Agents get the goal in words and a score. The grader and test
+  data are hidden by the sandbox, and `check` proves it, so agents cannot overfit to the scorer.
+- **Tokens, not time.** The budget is weighted tokens, one unit for every agent. Parallelism only
+  changes wall-clock time, so `parallel: 1` gives the same results.
+- **Facts on disk, everything else derived.** Only facts are saved, after every episode and grade;
+  totals, the best result and rounds are computed. A stopped or crashed run resumes where it was.
+- **Small.** Standard library only; your workspace is copied, never modified.
+
+## Implementation
+
+The schedule (`state.plan`) is a fixed sequence of phases, each ending at a fraction of the budget:
+
+```mermaid
+flowchart LR
+    W([your workspace]) --> O["Opening round<br/>K fresh branches"]
+    O -->|best| L1["Lead<br/>same files and session"]
+    L1 -->|33% spent| F1["Fork and flush<br/>K branches: leader's files,<br/>fresh sessions"]
+    F1 -->|best| L2[Lead]
+    L2 -->|66% spent| F2[Fork and flush]
+    F2 -->|best| L3[Lead]
+    L3 -->|budget spent| B([best snapshot])
 ```
-/plugin install fork-and-flush --marketplace yikerman/fork-and-flush
+
+The components:
+
+```mermaid
+flowchart TB
+    U["you, in Claude Code or Codex<br/>(the skill)"] -->|init · check · start · status| C[fork-and-flush CLI]
+    C --> O["Orchestrator<br/>schedule · budget · selection"]
+    O <--> S[(state.json)]
+    O --> H["AbstractAgentHarness<br/>ClaudeCodeHarness · CodexHarness"]
+    H -->|"stream-json · app-server JSON-RPC"| A
+    subgraph box [agent CLI sandbox: bubblewrap or Seatbelt]
+        A[agent CLI] --> W[(branch workspace)]
+    end
+    W -->|.ff/submit| M[Mailroom]
+    M --> G["grader in private/<br/>unreadable to agents"]
+    M -->|score| W
+    M -->|best per branch| O
 ```
 
-or from a local checkout: `/plugin marketplace add /path/to/fork-and-flush`, then
-`/plugin install fork-and-flush@fork-and-flush`.
+One episode, with its submissions:
 
-Codex plugin (Codex reads the same `.claude-plugin/` manifests):
-
-```sh
-codex plugin marketplace add yikerman/fork-and-flush
-codex plugin add fork-and-flush@fork-and-flush
+```mermaid
+sequenceDiagram
+    participant O as Orchestrator
+    participant A as Agent CLI (sandboxed)
+    participant M as Mailroom
+    participant G as Grader
+    O->>A: the task (new session) or "Continue" (resumed)
+    loop while it works
+        A-->>O: token usage, streamed
+        A->>M: python3 .ff/submit
+        M->>M: snapshot the workspace
+        M->>G: grade the snapshot
+        G-->>M: feedback and score
+        M-->>A: score and best so far
+    end
+    O->>A: stop once the episode's allowance is used
 ```
 
-## Use
-
-```sh
-fork-and-flush init ~/my-problem --agent claude --budget-mtok 50 --name my-problem
-# edit  <run>/TASK.md                 the goal, in words: what the agents see
-#       <run>/private/grader/grade.py the grader; hidden test data also goes in private/
-#       <run>/config.json             model, effort, K, schedule, parallelism...
-fork-and-flush check my-problem    # grader deterministic? agents unable to read private/?
-fork-and-flush start my-problem    # background; resumable
-fork-and-flush status my-problem
-fork-and-flush stop my-problem
-```
-
-Runs live in `~/.local/share/fork-and-flush/runs/<name>` (`$FF_HOME` overrides). When a run finishes,
-`<run>/best` is a read-only snapshot of the workspace at the best submission.
-
-### The grader
-
-Agents get the research goal in words and a score, never the implementation of the score, so they
-cannot overfit to it. `grader.command` (default `python3 {private}/grader/grade.py`) runs on a
-snapshot of the submitted workspace, with the current directory and `$FF_SUBMISSION` set to that
-snapshot. It prints feedback for the agent on stdout and the **score as the last stdout line**
-(higher is better). stderr stays private. A non-zero exit marks the submission invalid. It must be
-deterministic.
-
-Agents submit by running `python3 .ff/submit` in their workspace as often as they like. That drops a
-request in `.ff/mailbox/`; the orchestrator, outside any agent sandbox, snapshots the workspace, runs
-the grader and writes the result back. Only each branch's best snapshot is kept.
-
-### Isolation
-
-Agents run inside their CLI's own sandbox, configured through documented settings: they can write
-only their workspace, cannot read `<run>/private/`, and have no network unless you allow it.
-
-- **Claude Code:** `--settings` with `sandbox.enabled`, `filesystem.denyRead`, no unsandboxed
-  retries and `failIfUnavailable`, plus `Read`/`Edit` deny rules for the file tools the sandbox
-  does not cover. Extra settings go in `claude.settings`.
-- **Codex:** a permission profile (read everywhere but `private/`, write the workspace, no
-  network), passed as the thread's config. Extra config goes in `codex.config`. OpenAI labels
-  permission profiles beta.
-
-Both sandboxes also let agents write temporary directories, so a run directory may not live in one
-(the default, `~/.local/share/fork-and-flush/runs`, is fine). Both use bubblewrap on Linux (Claude Code also needs `socat`) and Seatbelt on macOS. `check` asks the
-agent to read a random canary in `private/` and fails if it can, or if the sandbox is unavailable.
-
-Branches share the machine, so they can slow each other down. When the score depends on timing,
-set `parallel` to 1 and `grader.exclusive` to true: branches then run one at a time and all agents
-are paused while the grader measures. Results are the same, only slower in wall-clock time.
-
-### Budget
-
-The budget is in **millions of weighted tokens**, the same unit for both agents. The default weights
-are input 1, cache read 0.1, cache write 1.25 and output 5, roughly API price ratios. With them,
-1M weighted tokens costs about one million input tokens' worth on the model you use.
-
-Usage is read while the agent works, so an episode that exceeds its allowance is stopped mid-run.
-Codex gets `turn/interrupt`; Claude Code's headless mode has no interrupt, so it is killed.
-
-## How the agents are driven
-
-Only documented machine interfaces are used:
-
-- **Claude Code:** `claude -p --output-format stream-json --verbose`, plus `--resume <session>` for
-  later episodes. Usage comes from each streamed assistant message.
-- **Codex:** `codex app-server` (JSON-RPC over stdio): `initialize`, `thread/start` or
-  `thread/resume`, `turn/start`, and running totals from `thread/tokenUsage/updated`. OpenAI labels
-  the app server experimental.
-
-Both share `AbstractAgentHarness` (`src/fork_and_flush/harness.py`). A harness only says how to start
-the CLI, what to send, and how to read one JSON message. Adding another CLI means one more subclass.
-
-Claude Code runs with `--permission-mode auto`, Codex with `approvalPolicy: never`; both inside the
-sandboxes above.
-
-## Limits of this version
-
-- Workspaces are plain full copies (no exclusions, no copy-on-write). Large data belongs outside the
-  workspace, referenced by absolute path.
-- Branches share the machine's CPUs, GPUs and ports (see Isolation for timing-sensitive scores).
-- Agent processes, including background jobs they started, are stopped at the end of every episode.
-- A Claude Code episode cut off by an orchestrator crash is not charged.
+- **Harnesses** (`harness.py`): `claude -p --output-format stream-json`, and `codex app-server`
+  (`thread/start`, `turn/start`, `thread/tokenUsage/updated`; OpenAI labels it experimental). A
+  harness only says how to start its CLI, what to send, and how to read one JSON message.
+- **Budget:** weights per token are input 1, cache read 0.1, cache write 1.25 and output 5. Usage
+  streams in, so an over-allowance episode is interrupted (Codex) or killed (Claude Code).
+- **Sandbox:** Claude Code gets `--settings` with a strict sandbox and `Read` deny rules; Codex
+  gets a permission profile. Both let agents write only their workspace and temp directories, so a
+  run directory may not live in one. There is no network unless allowed in `claude.settings` or
+  `codex.config`.
+- **Limits:** workspaces are plain full copies; branches share the machine; an agent's background
+  jobs end with its episode.
 
 ## Development
 
 ```sh
 uv sync
-uv run pytest           # end-to-end tests against fake claude/codex CLIs; no model calls
+uv run pytest   # end to end, against fake claude and codex CLIs; no model calls
 uv run ruff check . && uv run ruff format --check . && uv run ty check
 ```
