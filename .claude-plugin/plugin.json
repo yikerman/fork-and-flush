@@ -1,0 +1,10 @@
+{
+  "name": "fork-and-flush",
+  "version": "0.1.0",
+  "description": "Set up and monitor fork-and-flush research runs (arXiv:2610.07447) with Claude Code or Codex agents.",
+  "author": {
+    "name": "Yi Cao",
+    "email": "yi@ycao.net"
+  },
+  "repository": "https://github.com/yikerman/fork-and-flush"
+}

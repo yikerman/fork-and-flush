@@ -1,0 +1,34 @@
+[project]
+name = "fork-and-flush"
+version = "0.1.0"
+description = "Fork-and-flush for Claude Code and Codex: periodically fork a long-running research agent into fresh-context branches and keep the best-scoring one."
+readme = "README.md"
+authors = [
+    { name = "Yi Cao", email = "yi@ycao.net" }
+]
+requires-python = ">=3.9"
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/yikerman/fork-and-flush"
+
+[project.scripts]
+fork-and-flush = "fork_and_flush.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.17.1",
+    "ty>=0.0.89",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.19,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+# Runs refuse to live in temporary directories (agents can write there), so tests use a local one.
+addopts = "--basetemp=.pytest-tmp"

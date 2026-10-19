@@ -1,0 +1,15 @@
+{
+  "name": "fork-and-flush",
+  "description": "Fork-and-flush research runs for Claude Code and Codex.",
+  "owner": {
+    "name": "Yi Cao",
+    "email": "yi@ycao.net"
+  },
+  "plugins": [
+    {
+      "name": "fork-and-flush",
+      "source": "./",
+      "description": "Set up and monitor fork-and-flush research runs (arXiv:2610.07447) with Claude Code or Codex agents."
+    }
+  ]
+}
